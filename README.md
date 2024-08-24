@@ -28,3 +28,5 @@ The service can be requested with the url
 With the Docker build file a Image can be created, that then can be executed in the cluster
 In the deploy folder are examples of deployment files.
 In the deployment yaml the service account must be set. The serviceaccount must be admin in the current namespace and cluster-reader
+
+If a table with the node resources is displayed there is also a download link to download the table as an excel file.
