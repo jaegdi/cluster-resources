@@ -1,0 +1,111 @@
+package main
+
+import (
+	"context"
+	"flag"
+	"fmt"
+	"log"
+	"os"
+	"path/filepath"
+
+	v1 "k8s.io/api/core/v1"
+	"k8s.io/apimachinery/pkg/api/resource"
+	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/client-go/kubernetes"
+	"k8s.io/client-go/tools/clientcmd"
+	"k8s.io/client-go/util/homedir"
+	metricsv "k8s.io/metrics/pkg/client/clientset/versioned"
+)
+
+func main() {
+	var kubeconfig *string
+	if home := homedir.HomeDir(); home != "" {
+		kubeconfig = flag.String("kubeconfig", filepath.Join(home, ".kube", "config"), "(optional) absolute path to the kubeconfig file")
+	} else {
+		kubeconfig = flag.String("kubeconfig", "", "absolute path to the kubeconfig file")
+	}
+	flag.Parse()
+
+	// Verwende die Umgebungsvariable $KUBECONFIG, falls gesetzt
+	if envKubeconfig := os.Getenv("KUBECONFIG"); envKubeconfig != "" {
+		kubeconfig = &envKubeconfig
+	}
+
+	config, err := clientcmd.BuildConfigFromFlags("", *kubeconfig)
+	if err != nil {
+		log.Fatalf("Error building kubeconfig: %v", err)
+	}
+
+	clientset, err := kubernetes.NewForConfig(config)
+	if err != nil {
+		log.Fatalf("Error creating Kubernetes client: %v", err)
+	}
+
+	metricsClient, err := metricsv.NewForConfig(config)
+	if err != nil {
+		log.Fatalf("Error creating metrics client: %v", err)
+	}
+
+	nodes, err := clientset.CoreV1().Nodes().List(context.TODO(), metav1.ListOptions{})
+	if err != nil {
+		log.Fatalf("Error listing nodes: %v", err)
+	}
+
+	var totalRequestedCPU, totalRequestedMem, totalLimitsCPU, totalLimitsMem, totalUsedCPU, totalUsedMem resource.Quantity
+
+	for _, node := range nodes.Items {
+		if _, isWorker := node.Labels["node-role.kubernetes.io/worker"]; isWorker {
+			var nodeRequestedCPU, nodeRequestedMem, nodeLimitsCPU, nodeLimitsMem, nodeUsedCPU, nodeUsedMem resource.Quantity
+
+			pods, err := clientset.CoreV1().Pods("").List(context.TODO(), metav1.ListOptions{
+				FieldSelector: fmt.Sprintf("spec.nodeName=%s", node.Name),
+			})
+			if err != nil {
+				log.Fatalf("Error listing pods on node %s: %v", node.Name, err)
+			}
+
+			for _, pod := range pods.Items {
+				for _, container := range pod.Spec.Containers {
+					requests := container.Resources.Requests
+					limits := container.Resources.Limits
+
+					nodeRequestedCPU.Add(requests[v1.ResourceCPU])
+					nodeRequestedMem.Add(requests[v1.ResourceMemory])
+					nodeLimitsCPU.Add(limits[v1.ResourceCPU])
+					nodeLimitsMem.Add(limits[v1.ResourceMemory])
+				}
+			}
+
+			nodeMetrics, err := metricsClient.MetricsV1beta1().NodeMetricses().Get(context.TODO(), node.Name, metav1.GetOptions{})
+			if err != nil {
+				log.Fatalf("Error getting metrics for node %s: %v", node.Name, err)
+			}
+
+			nodeUsedCPU.Add(*nodeMetrics.Usage.Cpu())
+			nodeUsedMem.Add(*nodeMetrics.Usage.Memory())
+
+			fmt.Printf("Node: %s\n", node.Name)
+			fmt.Printf("  Requested CPU: %s\n", nodeRequestedCPU.String())
+			fmt.Printf("  Requested Memory: %s\n", nodeRequestedMem.String())
+			fmt.Printf("  Limits CPU: %s\n", nodeLimitsCPU.String())
+			fmt.Printf("  Limits Memory: %s\n", nodeLimitsMem.String())
+			fmt.Printf("  Used CPU: %s\n", nodeUsedCPU.String())
+			fmt.Printf("  Used Memory: %s\n", nodeUsedMem.String())
+
+			totalRequestedCPU.Add(nodeRequestedCPU)
+			totalRequestedMem.Add(nodeRequestedMem)
+			totalLimitsCPU.Add(nodeLimitsCPU)
+			totalLimitsMem.Add(nodeLimitsMem)
+			totalUsedCPU.Add(nodeUsedCPU)
+			totalUsedMem.Add(nodeUsedMem)
+		}
+	}
+
+	fmt.Println("Total across all worker nodes:")
+	fmt.Printf("  Total Requested CPU: %s\n", totalRequestedCPU.String())
+	fmt.Printf("  Total Requested Memory: %s\n", totalRequestedMem.String())
+	fmt.Printf("  Total Limits CPU: %s\n", totalLimitsCPU.String())
+	fmt.Printf("  Total Limits Memory: %s\n", totalLimitsMem.String())
+	fmt.Printf("  Total Used CPU: %s\n", totalUsedCPU.String())
+	fmt.Printf("  Total Used Memory: %s\n", totalUsedMem.String())
+}

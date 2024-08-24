@@ -1,0 +1,237 @@
+package main
+
+import (
+	"context"
+	"flag"
+	"fmt"
+	"html/template"
+	"log"
+	"os"
+	"path/filepath"
+
+	v1 "k8s.io/api/core/v1"
+	"k8s.io/apimachinery/pkg/api/resource"
+	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/client-go/kubernetes"
+	"k8s.io/client-go/tools/clientcmd"
+	"k8s.io/client-go/util/homedir"
+	metricsv "k8s.io/metrics/pkg/client/clientset/versioned"
+)
+
+type NodeMetrics struct {
+	Name            string
+	RequestedCPU    string
+	RequestedMemory string
+	LimitsCPU       string
+	LimitsMemory    string
+	UsedCPU         string
+	UsedMemory      string
+}
+
+type ClusterMetrics struct {
+	Nodes                []NodeMetrics
+	TotalRequestedCPU    string
+	TotalRequestedMemory string
+	TotalLimitsCPU       string
+	TotalLimitsMemory    string
+	TotalUsedCPU         string
+	TotalUsedMemory      string
+}
+
+func main() {
+	kubeconfig := getKubeConfig()
+	clientset, metricsClient := getClients(kubeconfig)
+	nodes := getNodes(clientset)
+	clusterMetrics := calculateClusterMetrics(clientset, metricsClient, nodes)
+	renderTemplate(clusterMetrics)
+}
+
+func getKubeConfig() *string {
+	var kubeconfig *string
+	if home := homedir.HomeDir(); home != "" {
+		kubeconfig = flag.String("kubeconfig", filepath.Join(home, ".kube", "config"), "(optional) absolute path to the kubeconfig file")
+	} else {
+		kubeconfig = flag.String("kubeconfig", "", "absolute path to the kubeconfig file")
+	}
+	flag.Parse()
+
+	if envKubeconfig := os.Getenv("KUBECONFIG"); envKubeconfig != "" {
+		kubeconfig = &envKubeconfig
+	}
+	return kubeconfig
+}
+
+func getClients(kubeconfig *string) (*kubernetes.Clientset, *metricsv.Clientset) {
+	config, err := clientcmd.BuildConfigFromFlags("", *kubeconfig)
+	if err != nil {
+		log.Fatalf("Error building kubeconfig: %v", err)
+	}
+
+	clientset, err := kubernetes.NewForConfig(config)
+	if err != nil {
+		log.Fatalf("Error creating Kubernetes client: %v", err)
+	}
+
+	metricsClient, err := metricsv.NewForConfig(config)
+	if err != nil {
+		log.Fatalf("Error creating metrics client: %v", err)
+	}
+
+	return clientset, metricsClient
+}
+
+func getNodes(clientset *kubernetes.Clientset) *v1.NodeList {
+	nodes, err := clientset.CoreV1().Nodes().List(context.TODO(), metav1.ListOptions{})
+	if err != nil {
+		log.Fatalf("Error listing nodes: %v", err)
+	}
+	return nodes
+}
+
+func calculateClusterMetrics(clientset *kubernetes.Clientset, metricsClient *metricsv.Clientset, nodes *v1.NodeList) ClusterMetrics {
+	var totalRequestedCPU, totalRequestedMem, totalLimitsCPU, totalLimitsMem, totalUsedCPU, totalUsedMem resource.Quantity
+	var nodeMetricsList []NodeMetrics
+
+	for _, node := range nodes.Items {
+		if _, isWorker := node.Labels["node-role.kubernetes.io/worker"]; isWorker {
+			nodeMetrics := calculateNodeMetrics(clientset, metricsClient, node)
+			nodeMetricsList = append(nodeMetricsList, nodeMetrics)
+
+			totalRequestedCPU.Add(parseQuantity(nodeMetrics.RequestedCPU))
+			totalRequestedMem.Add(parseQuantity(nodeMetrics.RequestedMemory))
+			totalLimitsCPU.Add(parseQuantity(nodeMetrics.LimitsCPU))
+			totalLimitsMem.Add(parseQuantity(nodeMetrics.LimitsMemory))
+			totalUsedCPU.Add(parseQuantity(nodeMetrics.UsedCPU))
+			totalUsedMem.Add(parseQuantity(nodeMetrics.UsedMemory))
+		}
+	}
+
+	return ClusterMetrics{
+		Nodes:                nodeMetricsList,
+		TotalRequestedCPU:    totalRequestedCPU.String(),
+		TotalRequestedMemory: totalRequestedMem.String(),
+		TotalLimitsCPU:       totalLimitsCPU.String(),
+		TotalLimitsMemory:    totalLimitsMem.String(),
+		TotalUsedCPU:         totalUsedCPU.String(),
+		TotalUsedMemory:      totalUsedMem.String(),
+	}
+}
+
+func calculateNodeMetrics(clientset *kubernetes.Clientset, metricsClient *metricsv.Clientset, node v1.Node) NodeMetrics {
+	var nodeRequestedCPU, nodeRequestedMem, nodeLimitsCPU, nodeLimitsMem, nodeUsedCPU, nodeUsedMem resource.Quantity
+
+	pods, err := clientset.CoreV1().Pods("").List(context.TODO(), metav1.ListOptions{
+		FieldSelector: fmt.Sprintf("spec.nodeName=%s", node.Name),
+	})
+	if err != nil {
+		log.Fatalf("Error listing pods on node %s: %v", node.Name, err)
+	}
+
+	for _, pod := range pods.Items {
+		for _, container := range pod.Spec.Containers {
+			requests := container.Resources.Requests
+			limits := container.Resources.Limits
+
+			nodeRequestedCPU.Add(requests[v1.ResourceCPU])
+			nodeRequestedMem.Add(requests[v1.ResourceMemory])
+			nodeLimitsCPU.Add(limits[v1.ResourceCPU])
+			nodeLimitsMem.Add(limits[v1.ResourceMemory])
+		}
+	}
+
+	nodeMetrics, err := metricsClient.MetricsV1beta1().NodeMetricses().Get(context.TODO(), node.Name, metav1.GetOptions{})
+	if err != nil {
+		log.Fatalf("Error getting metrics for node %s: %v", node.Name, err)
+	}
+
+	nodeUsedCPU.Add(*nodeMetrics.Usage.Cpu())
+	nodeUsedMem.Add(*nodeMetrics.Usage.Memory())
+
+	return NodeMetrics{
+		Name:            node.Name,
+		RequestedCPU:    convertToMiIfNecessary(nodeRequestedCPU),
+		RequestedMemory: convertToMiIfNecessary(nodeRequestedMem),
+		LimitsCPU:       convertToMiIfNecessary(nodeLimitsCPU),
+		LimitsMemory:    convertToMiIfNecessary(nodeLimitsMem),
+		UsedCPU:         convertToMiIfNecessary(nodeUsedCPU),
+		UsedMemory:      convertToMiIfNecessary(nodeUsedMem),
+	}
+}
+
+func parseQuantity(quantityStr string) resource.Quantity {
+	quantity, err := resource.ParseQuantity(quantityStr)
+	if err != nil {
+		log.Fatalf("Error parsing quantity: %v", err)
+	}
+	return quantity
+}
+
+func convertIfNecessary(quantity resource.Quantity) resource.Quantity {
+	if quantity.Format == resource.DecimalSI {
+		return *convertToMi(&quantity)
+	}
+	return quantity
+}
+
+func convertToMiIfNecessary(quantity resource.Quantity) string {
+	if quantity.Format == resource.DecimalSI {
+		return fmt.Sprintf("%dMi", convertToMi(&quantity).Value())
+	}
+	return quantity.String()
+}
+
+func convertToMi(quantity *resource.Quantity) *resource.Quantity {
+	value := quantity.ScaledValue(resource.Milli)
+	// miValue := value / (1024 * 1024)
+	return resource.NewQuantity(value, resource.BinarySI)
+}
+
+func renderTemplate(clusterMetrics ClusterMetrics) {
+	tmpl := template.Must(template.New("clusterMetrics").Parse(`
+        <!DOCTYPE html>
+        <html>
+        <head>
+            <title>Cluster Metrics</title>
+        </head>
+        <body>
+            <h1>Cluster Metrics</h1>
+            <table border="1">
+                <tr>
+                    <th>Node</th>
+                    <th>Requested CPU (Mi)</th>
+                    <th>Requested Memory (Mi)</th>
+                    <th>Limits CPU (Mi)</th>
+                    <th>Limits Memory (Mi)</th>
+                    <th>Used CPU (Mi)</th>
+                    <th>Used Memory (Mi)</th>
+                </tr>
+                {{ range .Nodes }}
+                <tr>
+                    <td>{{ .Name }}</td>
+                    <td>{{ .RequestedCPU }}</td>
+                    <td>{{ .RequestedMemory }}</td>
+                    <td>{{ .LimitsCPU }}</td>
+                    <td>{{ .LimitsMemory }}</td>
+                    <td>{{ .UsedCPU }}</td>
+                    <td>{{ .UsedMemory }}</td>
+                </tr>
+                {{ end }}
+                <tr>
+                    <th>Total</th>
+                    <th>{{ .TotalRequestedCPU }}</th>
+                    <th>{{ .TotalRequestedMemory }}</th>
+                    <th>{{ .TotalLimitsCPU }}</th>
+                    <th>{{ .TotalLimitsMemory }}</th>
+                    <th>{{ .TotalUsedCPU }}</th>
+                    <th>{{ .TotalUsedMemory }}</th>
+                </tr>
+            </table>
+        </body>
+        </html>
+    `))
+
+	err := tmpl.Execute(os.Stdout, clusterMetrics)
+	if err != nil {
+		log.Fatalf("Error executing template: %v", err)
+	}
+}

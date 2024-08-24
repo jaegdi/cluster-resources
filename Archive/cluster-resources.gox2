@@ -1,0 +1,205 @@
+package main
+
+import (
+	"context"
+	"flag"
+	"fmt"
+	"html/template"
+	"log"
+	"os"
+	"path/filepath"
+
+	v1 "k8s.io/api/core/v1"
+	"k8s.io/apimachinery/pkg/api/resource"
+	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/client-go/kubernetes"
+	"k8s.io/client-go/tools/clientcmd"
+	"k8s.io/client-go/util/homedir"
+	metricsv "k8s.io/metrics/pkg/client/clientset/versioned"
+)
+
+type NodeMetrics struct {
+	Name            string
+	RequestedCPU    string
+	RequestedMemory string
+	LimitsCPU       string
+	LimitsMemory    string
+	UsedCPU         string
+	UsedMemory      string
+}
+
+type ClusterMetrics struct {
+	Nodes                []NodeMetrics
+	TotalRequestedCPU    string
+	TotalRequestedMemory string
+	TotalLimitsCPU       string
+	TotalLimitsMemory    string
+	TotalUsedCPU         string
+	TotalUsedMemory      string
+}
+
+func main() {
+	var kubeconfig *string
+	if home := homedir.HomeDir(); home != "" {
+		kubeconfig = flag.String("kubeconfig", filepath.Join(home, ".kube", "config"), "(optional) absolute path to the kubeconfig file")
+	} else {
+		kubeconfig = flag.String("kubeconfig", "", "absolute path to the kubeconfig file")
+	}
+	flag.Parse()
+
+	// Verwende die Umgebungsvariable $KUBECONFIG, falls gesetzt
+	if envKubeconfig := os.Getenv("KUBECONFIG"); envKubeconfig != "" {
+		kubeconfig = &envKubeconfig
+	}
+
+	config, err := clientcmd.BuildConfigFromFlags("", *kubeconfig)
+	if err != nil {
+		log.Fatalf("Error building kubeconfig: %v", err)
+	}
+
+	clientset, err := kubernetes.NewForConfig(config)
+	if err != nil {
+		log.Fatalf("Error creating Kubernetes client: %v", err)
+	}
+
+	metricsClient, err := metricsv.NewForConfig(config)
+	if err != nil {
+		log.Fatalf("Error creating metrics client: %v", err)
+	}
+
+	nodes, err := clientset.CoreV1().Nodes().List(context.TODO(), metav1.ListOptions{})
+	if err != nil {
+		log.Fatalf("Error listing nodes: %v", err)
+	}
+
+	var totalRequestedCPU, totalRequestedMem, totalLimitsCPU, totalLimitsMem, totalUsedCPU, totalUsedMem resource.Quantity
+	var nodeMetricsList []NodeMetrics
+
+	for _, node := range nodes.Items {
+		if _, isWorker := node.Labels["node-role.kubernetes.io/worker"]; isWorker {
+			var nodeRequestedCPU, nodeRequestedMem, nodeLimitsCPU, nodeLimitsMem, nodeUsedCPU, nodeUsedMem resource.Quantity
+
+			pods, err := clientset.CoreV1().Pods("").List(context.TODO(), metav1.ListOptions{
+				FieldSelector: fmt.Sprintf("spec.nodeName=%s", node.Name),
+			})
+			if err != nil {
+				log.Fatalf("Error listing pods on node %s: %v", node.Name, err)
+			}
+
+			for _, pod := range pods.Items {
+				for _, container := range pod.Spec.Containers {
+					requests := container.Resources.Requests
+					limits := container.Resources.Limits
+
+					nodeRequestedCPU.Add(convertIfNecessary(requests[v1.ResourceCPU]))
+					nodeRequestedMem.Add(convertIfNecessary(requests[v1.ResourceMemory]))
+					nodeLimitsCPU.Add(convertIfNecessary(limits[v1.ResourceCPU]))
+					nodeLimitsMem.Add(convertIfNecessary(limits[v1.ResourceMemory]))
+				}
+			}
+
+			nodeMetrics, err := metricsClient.MetricsV1beta1().NodeMetricses().Get(context.TODO(), node.Name, metav1.GetOptions{})
+			if err != nil {
+				log.Fatalf("Error getting metrics for node %s: %v", node.Name, err)
+			}
+
+			nodeUsedCPU.Add(convertIfNecessary(*nodeMetrics.Usage.Cpu()))
+			nodeUsedMem.Add(convertIfNecessary(*nodeMetrics.Usage.Memory()))
+
+			nodeMetricsList = append(nodeMetricsList, NodeMetrics{
+				Name:            node.Name,
+				RequestedCPU:    convertToMiStringIfNecessary(nodeRequestedCPU),
+				RequestedMemory: convertToMiStringIfNecessary(nodeRequestedMem),
+				LimitsCPU:       convertToMiStringIfNecessary(nodeLimitsCPU),
+				LimitsMemory:    convertToMiStringIfNecessary(nodeLimitsMem),
+				UsedCPU:         convertToMiStringIfNecessary(nodeUsedCPU),
+				UsedMemory:      convertToMiStringIfNecessary(nodeUsedMem),
+			})
+
+			totalRequestedCPU.Add(nodeRequestedCPU)
+			totalRequestedMem.Add(nodeRequestedMem)
+			totalLimitsCPU.Add(nodeLimitsCPU)
+			totalLimitsMem.Add(nodeLimitsMem)
+			totalUsedCPU.Add(nodeUsedCPU)
+			totalUsedMem.Add(nodeUsedMem)
+		}
+	}
+
+	clusterMetrics := ClusterMetrics{
+		Nodes:                nodeMetricsList,
+		TotalRequestedCPU:    convertToMiStringIfNecessary(totalRequestedCPU),
+		TotalRequestedMemory: convertToMiStringIfNecessary(totalRequestedMem),
+		TotalLimitsCPU:       convertToMiStringIfNecessary(totalLimitsCPU),
+		TotalLimitsMemory:    convertToMiStringIfNecessary(totalLimitsMem),
+		TotalUsedCPU:         convertToMiStringIfNecessary(totalUsedCPU),
+		TotalUsedMemory:      convertToMiStringIfNecessary(totalUsedMem),
+	}
+
+	tmpl := template.Must(template.New("clusterMetrics").Parse(`
+				<!DOCTYPE html>
+				<html>
+				<head>
+					<title>Cluster Metrics</title>
+				</head>
+				<body>
+					<h1>Cluster Metrics</h1>
+					<table border="1">
+						<tr>
+							<th>Node</th>
+							<th>Requested CPU (Mi)</th>
+							<th>Requested Memory (Mi)</th>
+							<th>Limits CPU (Mi)</th>
+							<th>Limits Memory (Mi)</th>
+							<th>Used CPU (Mi)</th>
+							<th>Used Memory (Mi)</th>
+						</tr>
+						{{ range .Nodes }}
+						<tr>
+							<td>{{ .Name }}</td>
+							<td>{{ .RequestedCPU }}</td>
+							<td>{{ .RequestedMemory }}</td>
+							<td>{{ .LimitsCPU }}</td>
+							<td>{{ .LimitsMemory }}</td>
+							<td>{{ .UsedCPU }}</td>
+							<td>{{ .UsedMemory }}</td>
+						</tr>
+						{{ end }}
+						<tr>
+							<th>Total</th>
+							<th>{{ .TotalRequestedCPU }}</th>
+							<th>{{ .TotalRequestedMemory }}</th>
+							<th>{{ .TotalLimitsCPU }}</th>
+							<th>{{ .TotalLimitsMemory }}</th>
+							<th>{{ .TotalUsedCPU }}</th>
+							<th>{{ .TotalUsedMemory }}</th>
+						</tr>
+					</table>
+				</body>
+				</html>
+			`))
+
+	err = tmpl.Execute(os.Stdout, clusterMetrics)
+	if err != nil {
+		log.Fatalf("Error executing template: %v", err)
+	}
+}
+
+func convertIfNecessary(quantity resource.Quantity) resource.Quantity {
+	if quantity.Format == resource.DecimalSI {
+		return convertToMi(quantity)
+	}
+	return quantity
+}
+
+func convertToMiStringIfNecessary(quantity resource.Quantity) string {
+	if quantity.Format == resource.DecimalSI {
+		return fmt.Sprintf("%dMi", convertToMi(quantity))
+	}
+	return quantity.String()
+}
+
+func convertToMi(quantity resource.Quantity) resource.Quantity {
+	value := quantity.ScaledValue(resource.Milli)
+	// miValue := value / (1024 * 1024)
+	return *resource.NewQuantity(value, resource.BinarySI)
+}
