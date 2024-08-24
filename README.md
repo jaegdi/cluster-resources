@@ -1,5 +1,5 @@
 # View Node Resources of Openshift / Kubernets Cluster
-This programm generates a table with all nodes of the cluster
+This programm generates a table with all nodes of the cluster and the facts about CPU and RAM.
 
 For each node the resources for
 
