@@ -7,8 +7,8 @@ echo "Dir: $dir"
 # set cluster the the first parameter if given or to the env-Var CLUSTER
 cluster="${1:-$CLUSTER}"
 if [ "$cluster" != "$CLUSTER" ]; then
-    # login into the cluster
-    source ocl $cluster -d
+    # log into the cluster with a shell function, can be replaced with "oc login ....."
+    source ocl "$cluster" -d
 fi
 echo "CLUSTER: $CLUSTER"
 # unset my shell functio for podman, to use the native podman
