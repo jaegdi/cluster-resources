@@ -1,11 +1,14 @@
 # View Node Resources of Openshift / Kubernets Cluster
 This programm generates a table with all nodes of the cluster
+
 For each node the resources for
-- physical resources of the node
-- sum of requested resources by all pods of the node
-- sum of all limit resources definition of all pods of the node
-- sum of current used resources of the node
-  are gathered and display in the table
+
+- physical resources of the node   (blue column)
+- sum of requested resources by all pods of the node  (green column)
+- sum of all limit resources definition of all pods of the node  (red column)
+- sum of current used resources of the node  (orange column)
+
+are gathered and display in the table
 
 ## Working Modes
 ### CLI
