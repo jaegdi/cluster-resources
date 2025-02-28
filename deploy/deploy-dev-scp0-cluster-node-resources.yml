@@ -9,7 +9,7 @@ metadata:
   namespace: scp-operations-dev
 spec:
   progressDeadlineSeconds: 600
-  replicas: 1
+  replicas: 2
   revisionHistoryLimit: 10
   selector:
     matchLabels:
@@ -85,7 +85,7 @@ metadata:
   name: cluster-node-resources
   namespace: scp-operations-dev
 spec:
-  host: cluster-node-resources.svc.dev-scp0.sf-rz.de
+  host: cluster-node-resources.apps.dev-scp0.sf-rz.de
   port:
     targetPort: 8080-tcp
   tls:

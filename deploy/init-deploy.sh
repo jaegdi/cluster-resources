@@ -5,6 +5,7 @@ for c in dev cid ppr vpt pro; do
     # define the cluster-name
     clustername="$c-scp0"
     # log into the cluster with a shell function, can be replaced with "oc login ....."
+    # shellcheck disable=SC1091
     . ocl $clustername
     # which serviceaccount is used depends of our clusters
     if [[ $c =~ dev|cid ]]; then

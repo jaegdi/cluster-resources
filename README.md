@@ -33,3 +33,16 @@ In the deploy folder are examples of deployment files.
 In the deployment yaml the service account must be set. The serviceaccount must be admin in the current namespace and cluster-reader
 
 If a table with the node resources is displayed there is also a download link to download the table as an excel file.
+
+__The Webservice tries to get a token from the Serviceaccount scp in namespace scp-operations-<cluster>__
+
+__!!! New createt Serviceaccounts in Openshift 4.16 and above have no token per default.
+If der Service print the error in the log:
+Error getting token from secret: no secret with 'token' in the name found
+then create a secret for the serviceaccoutn scp in ns scp-operations-|cluster>
+!!!__
+```bash
+oc project scp-operations-dev # or cid, ppr, pro or oc project scp-ops-central for pro-scp1
+oc create secret generic scp-token --from-literal=token="$(oc create token scp --duration=$((24 * 60 * 365 * 3))m)"
+oc secret link scp scp-token
+```

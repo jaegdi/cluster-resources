@@ -16,6 +16,7 @@ import (
 	"text/tabwriter"
 
 	"github.com/tealeg/xlsx"
+	authenticationv1 "k8s.io/api/authentication/v1"
 	v1 "k8s.io/api/core/v1"
 	"k8s.io/apimachinery/pkg/api/resource"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
@@ -41,6 +42,8 @@ type NodeMetrics struct {
 	UsedCPU         string            // Die genutzte CPU des Knotens
 	UsedMemory      string            // Der genutzte Speicher des Knotens
 	Labels          map[string]string // Neues Feld für Labels
+	MaxPods         int               // Neues Feld für die maximale Anzahl von Pods
+	RunningPods     int               // Neues Feld für die Anzahl der laufenden Pods
 }
 
 // ClusterMetrics enthält aggregierte Metriken für den gesamten Cluster.
@@ -57,6 +60,8 @@ type ClusterMetrics struct {
 	TotalLimitsMemory    string        // Die Gesamtsumme des begrenzten Speichers im Cluster
 	TotalUsedCPU         string        // Die Gesamtsumme der genutzten CPU im Cluster
 	TotalUsedMemory      string        // Die Gesamtsumme des genutzten Speichers im Cluster
+	TotalMaxPods         int           // Die Gesamtsumme der maximalen Anzahl von Pods im Cluster
+	TotalRunningPods     int           // Die Gesamtsumme der laufenden Pods im Cluster
 }
 
 var nodeType, serviceaccountname, kubeconfig *string // Globale Variablen für den Knotentyp und den Service-Account
@@ -105,11 +110,16 @@ func main() {
 			if nodeType == "" {
 				nodeType = "all"
 			}
+			log.Println("Received query for node-type:", nodeType)
 			clusterMetrics = calculateClusterMetrics(clientset, metricsClient, nodes, nodeType)
 			sortNodeMetricsByName(clusterMetrics.Nodes)
 			renderTemplate(w, clusterMetrics)
-			printASCIITable(clusterMetrics)
+			log.Println("Rendered template ready for response of query node-type:", nodeType)
+			// printASCIITable(clusterMetrics)
 		})
+
+		// HTTP-Handler für den redirectToMetrics-Endpunkt einrichten
+		http.HandleFunc("/", redirectToMetrics)
 
 		// HTTP-Handler für das /download/excel-Endpunkt einrichten
 		http.HandleFunc("/download/excel", downloadExcelHandler)
@@ -127,6 +137,10 @@ func main() {
 		sortNodeMetricsByName(clusterMetrics.Nodes)
 		printASCIITable(clusterMetrics)
 	}
+}
+
+func redirectToMetrics(w http.ResponseWriter, r *http.Request) {
+	http.Redirect(w, r, "/metrics", http.StatusMovedPermanently)
 }
 
 // getFlags parst Befehlszeilen-Flags und gibt deren Werte zurück.
@@ -356,7 +370,20 @@ func getTokenFromSecret(clientset *kubernetes.Clientset, namespace, serviceAccou
 
 	// Check if the service account has any secrets
 	if len(sa.Secrets) == 0 {
-		return "", fmt.Errorf("no secrets found for service account: %s", serviceAccountName)
+		// Create a token for the service account that lasts for 3 years
+		var duration *int64
+		duration = new(int64)
+		*duration = 3 * 365 * 24 * 60 * 60 // 3 years in seconds
+		tokenRequest := &authenticationv1.TokenRequest{
+			Spec: authenticationv1.TokenRequestSpec{
+				ExpirationSeconds: duration, // 3 years in seconds
+			},
+		}
+		tokenResponse, err := clientset.CoreV1().ServiceAccounts(namespace).CreateToken(context.TODO(), serviceAccountName, tokenRequest, metav1.CreateOptions{})
+		if err != nil {
+			return "", fmt.Errorf("error creating token for service account: %v", err)
+		}
+		return tokenResponse.Status.Token, nil
 	}
 
 	// Get the secret associated with the service account
@@ -392,16 +419,6 @@ func getTokenFromSecret(clientset *kubernetes.Clientset, namespace, serviceAccou
 //
 // Parameter:
 // - clientset: Ein Kubernetes-Clientset, das verwendet wird, um mit der Kubernetes-API zu kommunizieren.
-//
-// Rückgabewerte:
-// - *v1.NodeList: Eine Liste der Knoten im Cluster.
-//
-// Fehler:
-// Diese Funktion beendet das Programm mit einem log.Fatalf-Aufruf, wenn ein Fehler beim Abrufen der Knotenliste auftritt.
-//
-// Beispiel:
-//
-//	nodes := getNodes(clientset)
 //
 // Ablauf:
 // 1. Listet die Knoten im Cluster unter Verwendung des Kubernetes-Clientsets.
@@ -443,6 +460,7 @@ func getNodes(clientset *kubernetes.Clientset) *v1.NodeList {
 func calculateClusterMetrics(clientset *kubernetes.Clientset, metricsClient *metricsv.Clientset, nodes *v1.NodeList, nodeType string) ClusterMetrics {
 	// Initialisiere Variablen für die Gesamtsummen der verschiedenen Metriken
 	var totalPhysicalCPU, totalPhysicalMemory, totalRequestedCPU, totalRequestedMem, totalLimitsCPU, totalLimitsMem, totalUsedCPU, totalUsedMem resource.Quantity
+	var totalMaxPods, totalRunningPods int
 	var nodeMetricsList []NodeMetrics
 
 	// Verwende einen WaitGroup, um die parallele Verarbeitung der Knoten zu synchronisieren
@@ -457,7 +475,7 @@ func calculateClusterMetrics(clientset *kubernetes.Clientset, metricsClient *met
 			// Starte eine Goroutine zur Berechnung der Metriken für den Knoten
 			go func(node v1.Node) {
 				defer wg.Done()
-				nodeMetrics := calculateNodeMetrics(clientset, metricsClient, node, nodeType)
+				nodeMetrics := calculateNodeMetrics(clientset, metricsClient, node) // , nodeType
 				nodeMetricsChan <- nodeMetrics
 			}(node)
 		}
@@ -478,6 +496,8 @@ func calculateClusterMetrics(clientset *kubernetes.Clientset, metricsClient *met
 		totalLimitsMem.Add(resource.MustParse(nodeMetrics.LimitsMemory))
 		totalUsedCPU.Add(resource.MustParse(nodeMetrics.UsedCPU))
 		totalUsedMem.Add(resource.MustParse(nodeMetrics.UsedMemory))
+		totalMaxPods += nodeMetrics.MaxPods
+		totalRunningPods += nodeMetrics.RunningPods
 	}
 
 	// Erstelle und gib die ClusterMetrics-Struktur zurück
@@ -491,6 +511,8 @@ func calculateClusterMetrics(clientset *kubernetes.Clientset, metricsClient *met
 		TotalLimitsMemory:    convertMemStr(totalLimitsMem),
 		TotalUsedCPU:         convertCpuStr(totalUsedCPU),
 		TotalUsedMemory:      convertMemStr(totalUsedMem),
+		TotalMaxPods:         totalMaxPods,
+		TotalRunningPods:     totalRunningPods,
 	}
 }
 
@@ -523,7 +545,7 @@ func calculateClusterMetrics(clientset *kubernetes.Clientset, metricsClient *met
 // 5. Addiert die aktuellen Nutzungsmetriken zu den Gesamtsummen.
 // 6. Holt die physische Kapazität des Knotens.
 // 7. Erstellt und gibt die NodeMetrics-Struktur zurück.
-func calculateNodeMetrics(clientset *kubernetes.Clientset, metricsClient *metricsv.Clientset, node v1.Node, nodeType string) NodeMetrics {
+func calculateNodeMetrics(clientset *kubernetes.Clientset, metricsClient *metricsv.Clientset, node v1.Node) NodeMetrics {
 	// Initialisiere Variablen für die verschiedenen Metriken
 	var nodeRequestedCPU, nodeRequestedMem, nodeLimitsCPU, nodeLimitsMem, nodeUsedCPU, nodeUsedMem resource.Quantity
 
@@ -547,6 +569,11 @@ func calculateNodeMetrics(clientset *kubernetes.Clientset, metricsClient *metric
 	if err != nil {
 		log.Fatalf("Error listing pods on node %s: %v", node.Name, err)
 	}
+
+	// Erhalte die die aktuell laufende Anzahl von Pods
+	runningPods := len(pods.Items)
+	// Erhalte die maximale Anzahl von Pods
+	maxPods := node.Status.Allocatable.Pods().Value()
 
 	// Iteriere über alle Pods auf dem Knoten
 	for _, pod := range pods.Items {
@@ -590,6 +617,8 @@ func calculateNodeMetrics(clientset *kubernetes.Clientset, metricsClient *metric
 		UsedCPU:         convertCpuStr(nodeUsedCPU),
 		UsedMemory:      convertMemStr(nodeUsedMem),
 		Labels:          labels, // Labels hinzufügen
+		MaxPods:         int(maxPods),
+		RunningPods:     runningPods,
 	}
 }
 
@@ -597,16 +626,6 @@ func calculateNodeMetrics(clientset *kubernetes.Clientset, metricsClient *metric
 //
 // Diese Funktion wird verwendet, um einen Ressourcen-String (z.B. "500m", "1Gi") in eine resource.Quantity-Struktur zu parsen.
 // Wenn ein Fehler beim Parsen auftritt, beendet die Funktion das Programm mit einem log.Fatalf-Aufruf.
-//
-// Parameter:
-// - quantityStr: Ein String, der die Ressource darstellt.
-//
-// Rückgabewerte:
-// - resource.Quantity: Die geparste resource.Quantity-Struktur.
-//
-// Beispiel:
-//
-//	quantity := parseQuantity("500m")
 func parseQuantity(quantityStr string) resource.Quantity {
 	quantity, err := resource.ParseQuantity(quantityStr)
 	if err != nil {
@@ -619,16 +638,6 @@ func parseQuantity(quantityStr string) resource.Quantity {
 //
 // Diese Funktion wird verwendet, um eine resource.Quantity, die eine CPU-Ressource darstellt, in einen String zu konvertieren,
 // der die CPU in Kernen darstellt. Die resultierende String-Darstellung hat zwei Dezimalstellen.
-//
-// Parameter:
-// - quantity: Eine resource.Quantity, die die CPU-Ressource darstellt.
-//
-// Rückgabewerte:
-// - string: Die CPU-Ressource als String in Kernen.
-//
-// Beispiel:
-//
-//	cpuStr := convertCpuStr(quantity)
 func convertCpuStr(quantity resource.Quantity) string {
 	return fmt.Sprintf("%.2f", float64(convertToMilli(&quantity).Value())/1000.0)
 }
@@ -637,16 +646,6 @@ func convertCpuStr(quantity resource.Quantity) string {
 //
 // Diese Funktion wird verwendet, um eine resource.Quantity, die eine Speicherressource darstellt, in einen String zu konvertieren,
 // der den Speicher in GiB (Gibibyte) darstellt.
-//
-// Parameter:
-// - quantity: Eine resource.Quantity, die die Speicherressource darstellt.
-//
-// Rückgabewerte:
-// - string: Die Speicherressource als String in GiB.
-//
-// Beispiel:
-//
-//	memStr := convertMemStr(quantity)
 func convertMemStr(quantity resource.Quantity) string {
 	return fmt.Sprintf("%dGi", convertToGiga(&quantity).Value())
 }
@@ -655,16 +654,6 @@ func convertMemStr(quantity resource.Quantity) string {
 //
 // Diese Funktion wird verwendet, um eine resource.Quantity in Milli-Einheiten zu konvertieren.
 // Die resultierende resource.Quantity hat den Wert in Milli-Einheiten.
-//
-// Parameter:
-// - quantity: Ein Zeiger auf eine resource.Quantity, die konvertiert werden soll.
-//
-// Rückgabewerte:
-// - *resource.Quantity: Eine neue resource.Quantity in Milli-Einheiten.
-//
-// Beispiel:
-//
-//	milliQuantity := convertToMilli(&quantity)
 func convertToMilli(quantity *resource.Quantity) *resource.Quantity {
 	value := quantity.ScaledValue(resource.Milli)
 	return resource.NewQuantity(value, resource.BinarySI)
@@ -674,16 +663,6 @@ func convertToMilli(quantity *resource.Quantity) *resource.Quantity {
 //
 // Diese Funktion wird verwendet, um eine resource.Quantity in Giga-Einheiten zu konvertieren.
 // Die resultierende resource.Quantity hat den Wert in Giga-Einheiten.
-//
-// Parameter:
-// - quantity: Ein Zeiger auf eine resource.Quantity, die konvertiert werden soll.
-//
-// Rückgabewerte:
-// - *resource.Quantity: Eine neue resource.Quantity in Giga-Einheiten.
-//
-// Beispiel:
-//
-//	gigaQuantity := convertToGiga(&quantity)
 func convertToGiga(quantity *resource.Quantity) *resource.Quantity {
 	value := quantity.ScaledValue(resource.Giga)
 	return resource.NewQuantity(value, resource.BinarySI)
@@ -692,13 +671,6 @@ func convertToGiga(quantity *resource.Quantity) *resource.Quantity {
 // sortNodeMetricsByName sortiert eine Liste von NodeMetrics nach dem Namen der Knoten.
 //
 // Diese Funktion wird verwendet, um eine Liste von NodeMetrics-Strukturen alphabetisch nach dem Namen der Knoten zu sortieren.
-//
-// Parameter:
-// - nodes: Eine Liste von NodeMetrics-Strukturen, die sortiert werden sollen.
-//
-// Beispiel:
-//
-//	sortNodeMetricsByName(nodeMetrics)
 func sortNodeMetricsByName(nodes []NodeMetrics) {
 	sort.Slice(nodes, func(i, j int) bool {
 		return nodes[i].Name < nodes[j].Name
@@ -766,6 +738,8 @@ func renderTemplate(w http.ResponseWriter, clusterMetrics ClusterMetrics) {
                     <th>Requested Memory (Gi)</th>
                     <th>Limits Memory (Gi)</th>
                     <th>Used Memory (Gi)</th>
+                    <th>Max Pods</th>
+                    <th>Running Pods</th>
                 </tr>
                 {{ range .Nodes }}
                 <tr title="{{ range $key, $value := .Labels }}{{ $key }}: {{ $value }}&#10;{{ end }}">
@@ -779,6 +753,8 @@ func renderTemplate(w http.ResponseWriter, clusterMetrics ClusterMetrics) {
                     <td class="requested-metrics center-text">{{ .RequestedMemory }}</td>
                     <td class="limited-metrics center-text">{{ .LimitsMemory }}</td>
                     <td class="used-metrics center-text">{{ .UsedMemory }}</td>
+                    <td class="limited-metrics">{{ .MaxPods }}</td>
+                    <td class="used-metrics">{{ .RunningPods }}</td>
                 </tr>
                 {{ end }}
                 <tr class="total-row">
@@ -792,9 +768,16 @@ func renderTemplate(w http.ResponseWriter, clusterMetrics ClusterMetrics) {
                     <th class="requested-metrics">{{ .TotalRequestedMemory }}</th>
                     <th class="limited-metrics">{{ .TotalLimitsMemory }}</th>
                     <th class="used-metrics">{{ .TotalUsedMemory }}</th>
+                    <th class="limited-metrics">{{ .TotalMaxPods }}</th>
+                    <th class="used-metrics">{{ .TotalRunningPods }}</th>
                 </tr>
             </table>
-            <p>optional params worker: /metrics/?node-type=worker; infra: /metrics?node-type=infra; master: /metrics?node-type=master; all: /metrics</p>
+            <p>
+                <a href="/metrics?node-type=master">Master Nodes</a> |
+                <a href="/metrics?node-type=worker">Worker Nodes</a> |
+                <a href="/metrics?node-type=infra">Infra Nodes</a> |
+                <a href="/metrics?node-type=all">All Nodes</a>
+            </p>
             <p><a href="/download/excel">Download Excel</a></p>
         </body>
         </html>
@@ -813,36 +796,30 @@ func renderTemplate(w http.ResponseWriter, clusterMetrics ClusterMetrics) {
 // Diese Funktion wird verwendet, um die Cluster-Metriken in einer formatierten ASCII-Tabelle auf die Standardausgabe zu drucken.
 // Die Tabelle zeigt die Metriken der einzelnen Knoten sowie die Gesamtsummen der Metriken.
 //
+// Es wird das tabwriter modul verwendet, um die Tabelle zu formatieren. Dieses Modul ermöglicht die Ausrichtung der Spalten und die Verwendung von Tabs.
+// Dazu sollten alle Spalten mit einem Tab getrennt werden, um die Ausrichtung zu gewährleisten und die letzte Saplte ein trailing Tab haben.
+//
 // Parameter:
 // - clusterMetrics: Eine Struktur, die die Cluster-Metriken enthält, die in der ASCII-Tabelle angezeigt werden sollen.
-//
-// Beispiel:
-//
-//	printASCIITable(clusterMetrics)
-//
-// Ablauf:
-// 1. Erstellt einen neuen Tabwriter, um die Tabelle zu formatieren.
-// 2. Druckt die Kopfzeile der Tabelle.
-// 3. Iteriert über alle Knoten und druckt deren Metriken.
-// 4. Druckt die Gesamtsummen der Metriken.
-// 5. Flusht den Tabwriter, um sicherzustellen, dass alle Daten geschrieben werden.
 func printASCIITable(clusterMetrics ClusterMetrics) {
 	// Erstelle einen neuen Tabwriter, um die Tabelle zu formatieren
 	w := tabwriter.NewWriter(os.Stdout, 0, 0, 1, ' ', tabwriter.Debug)
 
 	// Drucke die Kopfzeile der Tabelle
-	fmt.Fprintln(w, "Node\t Node Type\t Physical CPU\t Requested CPU\t Limits CPU\t Used CPU\t Physical Memory (Gi)\t Requested Memory (Gi)\t Limits Memory (Gi)\t Used Memory (Gi)\t")
+	fmt.Fprintln(w, "Node\t Node Type\t Physical CPU\t Requested CPU\t Limits CPU\t Used CPU\t Physical Memory (Gi)\t Requested Memory (Gi)\t Limits Memory (Gi)\t Used Memory (Gi)\t MaxPods\t RunningPods\t")
 
 	// Iteriere über alle Knoten und drucke deren Metriken
 	for _, node := range clusterMetrics.Nodes {
-		fmt.Fprintf(w, "%s\t %s\t %s\t %s\t %s\t %s\t %s\t %s\t %s\t %s\t\n",
-			node.Name, node.NodeType, node.PhysicalCPU, node.RequestedCPU, node.LimitsCPU, node.UsedCPU, node.PhysicalMemory, node.RequestedMemory, node.LimitsMemory, node.UsedMemory)
+		fmt.Fprintf(w, "%s\t %s\t %s\t %s\t %s\t %s\t %s\t %s\t %s\t %s\t %d\t %d\t\n",
+			node.Name, node.NodeType, node.PhysicalCPU, node.RequestedCPU, node.LimitsCPU, node.UsedCPU,
+			node.PhysicalMemory, node.RequestedMemory, node.LimitsMemory, node.UsedMemory, node.MaxPods, node.RunningPods)
 	}
 
 	// Drucke die Gesamtsummen der Metriken
-	fmt.Fprintf(w, "Total\t\t %s\t %s\t %s\t %s\t %s\t %s\t %s\t %s\t\n",
+	fmt.Fprintf(w, "Total\t\t %s\t %s\t %s\t %s\t %s\t %s\t %s\t %s\t %d\t %d\t\n",
 		clusterMetrics.TotalPhysicalCPU, clusterMetrics.TotalRequestedCPU, clusterMetrics.TotalLimitsCPU, clusterMetrics.TotalUsedCPU,
-		clusterMetrics.TotalPhysicalMemory, clusterMetrics.TotalRequestedMemory, clusterMetrics.TotalLimitsMemory, clusterMetrics.TotalUsedMemory)
+		clusterMetrics.TotalPhysicalMemory, clusterMetrics.TotalRequestedMemory, clusterMetrics.TotalLimitsMemory, clusterMetrics.TotalUsedMemory,
+		clusterMetrics.TotalMaxPods, clusterMetrics.TotalRunningPods)
 
 	// Flushe den Tabwriter, um sicherzustellen, dass alle Daten geschrieben werden
 	w.Flush()
@@ -881,7 +858,7 @@ func generateExcelFile(filePath string, clusterMetrics ClusterMetrics) error {
 
 	// Füge die Kopfzeile der Tabelle hinzu
 	headerRow := sheet.AddRow()
-	headers := []string{"Node", "Node Type", "Physical CPU (core)", "Requested CPU (core)", "Limits CPU (core)", "Used CPU (core)", "Physical Memory (Gi)", "Requested Memory (Gi)", "Limits Memory (Gi)", "Used Memory (Gi)"}
+	headers := []string{"Node", "Node Type", "Physical CPU (core)", "Requested CPU (core)", "Limits CPU (core)", "Used CPU (core)", "Physical Memory (Gi)", "Requested Memory (Gi)", "Limits Memory (Gi)", "Used Memory (Gi)", "Max Pods", "Running Pods"}
 	for _, header := range headers {
 		cell := headerRow.AddCell()
 		cell.Value = header
@@ -924,6 +901,8 @@ func generateExcelFile(filePath string, clusterMetrics ClusterMetrics) error {
 		if err != nil {
 			log.Fatalf("Error converting UsedMemory to float64: %v", err)
 		}
+		MaxPods := node.MaxPods
+		RunningPods := node.RunningPods
 		row.AddCell().SetFloat(PhysicalCPU)
 		row.AddCell().SetFloat(RequestedCPU)
 		row.AddCell().SetFloat(LimitsCPU)
@@ -932,6 +911,8 @@ func generateExcelFile(filePath string, clusterMetrics ClusterMetrics) error {
 		row.AddCell().SetFloat(RequestedMemory)
 		row.AddCell().SetFloat(LimitsMemory)
 		row.AddCell().SetFloat(UsedMemory)
+		row.AddCell().SetInt(MaxPods)
+		row.AddCell().SetInt(RunningPods)
 	}
 
 	// Füge die Gesamtsummen der Metriken zur Tabelle hinzu
@@ -970,6 +951,14 @@ func generateExcelFile(filePath string, clusterMetrics ClusterMetrics) error {
 	if err != nil {
 		log.Fatalf("Error converting TotalUsedMemory to float64: %v", err)
 	}
+	TotalMaxPods := clusterMetrics.TotalMaxPods
+	if err != nil {
+		log.Fatalf("Error converting TotalMaxPods to int: %v", err)
+	}
+	TotalRunningPods := clusterMetrics.TotalRunningPods
+	if err != nil {
+		log.Fatalf("Error converting TotalRunningPods to int: %v", err)
+	}
 	totalRow.AddCell().SetFloat(TotalPhysicalCPU)
 	totalRow.AddCell().SetFloat(TotalRequestedCPU)
 	totalRow.AddCell().SetFloat(TotalLimitsCPU)
@@ -978,6 +967,8 @@ func generateExcelFile(filePath string, clusterMetrics ClusterMetrics) error {
 	totalRow.AddCell().SetFloat(TotalRequestedMemory)
 	totalRow.AddCell().SetFloat(TotalLimitsMemory)
 	totalRow.AddCell().SetFloat(TotalUsedMemory)
+	totalRow.AddCell().SetInt(TotalMaxPods)
+	totalRow.AddCell().SetInt(TotalRunningPods)
 
 	// Speichere die Excel-Datei auf dem Server
 	err = file.Save(filePath)

@@ -28,16 +28,20 @@ if echo && echo "### start go build" && go build -v && echo "### go build ready"
     podman push default-route-openshift-image-registry.apps.cid-scp0.sf-rz.de/scp-images/cluster-node-resources:latest
 
     # copy the image to the other clusters
-    for dst in dev-scp0 ppr-scp0 vpt-scp0 pro-scp0; do
+    for dst in dev-scp0 ppr-scp0 vpt-scp0 pro-scp0 pro-scp1; do
         echo '----------------------------------------------------------------------------------------------------------'
-        copy-image.sh -v scl=cid-scp0 dcl=$dst sns=scp-images dns=scp-images image=cluster-node-resources:latest
+        copy-image.sh -v -sc=cid-scp0 -dc=$dst -sn=scp-images -dn=scp-images -i=cluster-node-resources:latest
     done
 
     # loop over the stages of our clusters
-    for dst in dev-scp0 cid-scp0 ppr-scp0 vpt-scp0 pro-scp0; do
+    for dst in dev-scp0 cid-scp0 ppr-scp0 vpt-scp0 pro-scp0 pro-scp1; do
         stage="${dst/-scp0/}"
         # log into the cluster
-        . ocl $dst "scp-operations-$stage"
+        if [ "$dst" != "pro-scp1" ]; then
+            . ocl $dst "scp-operations-$stage" -d
+        else
+            . ocl $dst "scp-ops-central" -d
+        fi
         # delete and deploy
         oc delete -f deploy/deploy-"$dst"-cluster-node-resources.yml
         oc apply -f deploy/deploy-"$dst"-cluster-node-resources.yml
