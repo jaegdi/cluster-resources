@@ -34,7 +34,7 @@ if echo && echo "### start go build" && go build -v && echo "### go build ready"
     done
 
     # loop over the stages of our clusters
-    for dst in dev-scp0 cid-scp0 ppr-scp0 vpt-scp0 pro-scp0 pro-scp1; do
+    for dst in $(cluster_list -all); do
         stage="${dst/-scp0/}"
         # log into the cluster
         if [ "$dst" != "pro-scp1" ]; then
