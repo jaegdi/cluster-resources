@@ -41,7 +41,7 @@ spec:
           - -server
           - -sa
           - scp
-        image: default-route-openshift-image-registry.apps.dev-scp0.sf-rz.de/scp-images/cluster-node-resources:latest
+        image: registry-quay-quay.apps.pro-scp1.sf-rz.de/scp/cluster-node-resources:latest
         imagePullPolicy: Always
         terminationMessagePath: /dev/termination-log
         terminationMessagePolicy: File

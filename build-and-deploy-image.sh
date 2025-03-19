@@ -13,34 +13,29 @@ fi
 echo "CLUSTER: $CLUSTER"
 # unset my shell functio for podman, to use the native podman
 unset podman
+quayurl="registry-quay-quay.apps.pro-scp1.sf-rz.de"
+image="$quayurl/scp/cluster-node-resources:latest"
 
 # when go build and podman build are ok, then go on
-if echo && echo "### start go build" && go build -v && echo "### go build ready" &&
-    echo && echo "### start image build" && podman build . | tee build.log; then
+if echo && echo "### start go build" \
+  && go build -v -o dist \
+  && echo "### go build ready" \
+  && echo \
+  && echo "### start image build" \
+  && podman build -f Dockerfile -t $image; then
 
-    # get the sha of the fresh buildet image from the build log
-    imagesha="$(tail -n 1 <build.log)"
-    rm build.log
-
-    # tag and push the image to the registry of the build cluster
-    echo "tag $imagesha to  default-route-openshift-image-registry.apps.cid-scp0.sf-rz.de/scp-images/cluster-node-resources:latest"
-    podman tag "$imagesha" default-route-openshift-image-registry.apps.cid-scp0.sf-rz.de/scp-images/cluster-node-resources:latest
-    podman push default-route-openshift-image-registry.apps.cid-scp0.sf-rz.de/scp-images/cluster-node-resources:latest
-
-    # copy the image to the other clusters
-    for dst in dev-scp0 ppr-scp0 vpt-scp0 pro-scp0 pro-scp1; do
-        echo '----------------------------------------------------------------------------------------------------------'
-        copy-image.sh -v -sc=cid-scp0 -dc=$dst -sn=scp-images -dn=scp-images -i=cluster-node-resources:latest
-    done
+    echo "# push the image to the quay registry"
+    podman push $image
+    echo "# pushed the image to the quay registry"
 
     # loop over the stages of our clusters
     for dst in $(cluster_list -all); do
         stage="${dst/-scp0/}"
         # log into the cluster
-        if [ "$dst" != "pro-scp1" ]; then
-            . ocl $dst "scp-operations-$stage" -d
-        else
+        if [ "$dst" == "pro-scp1" ]; then
             . ocl $dst "scp-ops-central" -d
+        else
+            . ocl $dst "scp-operations-$stage" -d
         fi
         # delete and deploy
         oc delete -f deploy/deploy-"$dst"-cluster-node-resources.yml
