@@ -2,8 +2,11 @@
 set -o pipefail
 
 scriptdir=$(dirname "$0")
-dir="$scriptdir"
+dir="$(dirname "$scriptdir")"
+cd "$dir" || exit 1
 echo "Dir: $dir"
+servicename="2"
+imagetag="$3"
 # set cluster the the first parameter if given or to the env-Var CLUSTER
 cluster="${1:-$CLUSTER}"
 if [ "$cluster" != "$CLUSTER" ]; then
@@ -14,7 +17,7 @@ echo "CLUSTER: $CLUSTER"
 # unset my shell functio for podman, to use the native podman
 unset podman
 quayurl="registry-quay-quay.apps.pro-scp1.sf-rz.de"
-image="$quayurl/scp/cluster-node-resources:latest"
+image="$quayurl/scp/$servicename:$imagetag"
 
 # when go build and podman build are ok, then go on
 if echo && echo "### start go build" \
@@ -38,8 +41,8 @@ if echo && echo "### start go build" \
             . ocl $dst "scp-operations-$stage" -d
         fi
         # delete and deploy
-        oc delete -f deploy/deploy-"$dst"-cluster-node-resources.yml
-        oc apply -f deploy/deploy-"$dst"-cluster-node-resources.yml
+        oc delete -f deploy/deploy-"$dst"-$servicename.yml
+        oc apply -f deploy/deploy-"$dst"-$servicename.yml
         echo '-----------------------------------------------------------------------'
     done
     # log into the build cluster

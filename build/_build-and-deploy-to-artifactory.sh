@@ -7,7 +7,7 @@ if [ -z "$1" ]; then
 fi
 
 BINARY_NAME="$1"
-BINARY_NAME_UBI7="dist/${BINARY_NAME}-ubi7"
+BINARY_NAME_UBI7="${BINARY_NAME}-ubi7"
 IMAGE="${BINARY_NAME}:ubi7"
 CONTAINER_NAME="${BINARY_NAME}-container"
 
@@ -47,21 +47,22 @@ if podman ps -a | rg "$CONTAINER_NAME" >/dev/null; then
     podman rm "$CONTAINER_NAME"
 fi
 podman create --name "$CONTAINER_NAME" "localhost/$IMAGE"
-podman cp "$CONTAINER_NAME":/app/dist/$BINARY_NAME "$BINARY_NAME_UBI7"
-scp "$BINARY_NAME_UBI7" cid-scp0-tls-v01-mgmt:
+podman cp "$CONTAINER_NAME":/app/dist/$BINARY_NAME "dist/$BINARY_NAME_UBI7"
 podman rm "$CONTAINER_NAME"
 
-artifactory-upload.sh -lf="$BINARY_NAME_UBI7"   -tr=scptools-bin-dev-local   -tf="tools/$BINARY_NAME"
-artifactory-upload.sh -lf="$BINARY_NAME_UBI7"   -tr=scptools-bin-dev-local   -tf="ocp-stable-4.16/clients/$BINARY_NAME"
+artifactory-upload.sh -lf="dist/$BINARY_NAME_UBI7"   -tr=scptools-bin-dev-local   -tf="tools/$BINARY_NAME"
+artifactory-upload.sh -lf="dist/$BINARY_NAME_UBI7"   -tr=scptools-bin-dev-local   -tf="ocp-stable-4.16/clients/$BINARY_NAME"
 
-# for cl in dev-scp0 dev-scp1-c1 dev-scp1-c2 cid-scp0 ppr-scp0 vpt-scp0 pro-scp0 pro-scp1; do
-#     nodepattern=tls-v01
-#     desthost=$cl-$nodepattern-mgmt
-#     if [[ $cl =~ dev-scp1-c[12] ]]; then
-#         clnr=$(echo $cl | cut -d'-' -f3)
-#         nodepattern=${clnr}t-v01
-#         desthost=$cl$nodepattern-mgmt
-#     fi
-#     scp $BINARY_NAME_UBI7 $desthost:/tmp/
-#     ansible-shell ocp $cl $nodepattern "install /tmp/$BINARY_NAME_UBI7 /usr/local/bin/$BINARY_NAME"
-# done
+for cl in dev-scp0 cid-scp0 ppr-scp0 vpt-scp0 pro-scp0 pro-scp1; do
+    nodepattern=tls-v01
+    desthost=$cl-$nodepattern-mgmt
+    if [[ $cl =~ dev-scp1-c[12] ]]; then
+        clnr=$(echo $cl | cut -d'-' -f3)
+        nodepattern=${clnr}t
+        desthost=$cl$nodepattern-mgmt
+    fi
+    if scp dist/$BINARY_NAME_UBI7 $desthost:/tmp/; then
+        echo ansible-shell ocp $cl $nodepattern "install /tmp/$BINARY_NAME_UBI7 /usr/local/bin/$BINARY_NAME"
+        ansible-shell ocp $cl $nodepattern "install /tmp/$BINARY_NAME_UBI7 /usr/local/bin/$BINARY_NAME"
+    fi
+done

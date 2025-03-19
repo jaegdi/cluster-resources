@@ -2,12 +2,19 @@
 set -eo pipefail
 
 . ocl cid-scp0 >/dev/null 2>&1
+
 script="$(basename "$0")"
 scriptdir="$(dirname "$0")"
 dir=$(dirname "$scriptdir")
 echo "script: $script, scriptdir: $scriptdir, Dir: $dir"
 cd "$dir"
-quayurl="registry-quay-quay.apps.pro-scp1.sf-rz.de"
+
+# set this variable to correct values
+quayurl="registry-quay-quay.apps.pro-scp1.sf-rz.de"     # default='registry-quay-quay.apps.pro-scp1.sf-rz.de'
+build='cluster-resources'                               # name of the go binary
+build_service_image='cluster-node-resources'            # name of the image-stream, if a service image should be created, default='false'
+# end var
+
 if podman login -u "$USER" -p "$(eval "$LDAPPASSWORDPROVIDER")" "$quayurl" >/dev/null 2>&1; then
     echo "quayurl: $quayurl"
 else
@@ -19,7 +26,6 @@ echo "# Set defaults and evaluate commandline parameters"
 CLUSTER=cid-scp0
 tagversion="$(get-git-tag.sh)"
 # per default make it all
-build='cluster-resources'
 
 hilfe() {
     if [[ -n $1 ]]; then
@@ -93,11 +99,19 @@ if [ "$build" != 'false' ]; then
     if [ "$tagversion" != 'latest' ]; then
         # Ensure git checkout master is executed on script exit
         trap 'git checkout master' EXIT
-        echo "git checkout $tagversion"
+        echo "# git checkout $tagversion"
         git checkout "$tagversion"
     fi
+
+    # build the $build and deploy to artifactory
     echo "Build $build local and deploy to artifactory"
     "$scriptdir"/_build-and-deploy-to-artifactory.sh $build
+
+    # build the $build image and deploy to artifactory
+    if [ "$build_service_image" != 'false' ]; then
+        echo "Build image $build"
+        "$scriptdir"/_build-and-deploy-image.sh $build_service_image $tagversion
+    fi
 
 fi
 
