@@ -12,6 +12,7 @@ IMAGE="${BINARY_NAME}:ubi7"
 CONTAINER_NAME="${BINARY_NAME}-container"
 
 mkdir -p dist
+go mod tidy
 # build the linux binary
 echo "Build linux binary of $BINARY_NAME"
 go build -v -o dist
